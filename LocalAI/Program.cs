@@ -1,7 +1,10 @@
-﻿using Microsoft.Extensions.AI;
+﻿using System.Collections.Generic;
+using System.Diagnostics.Metrics;
+using System.Text.Json;
+using Microsoft.Extensions.AI;
 using OllamaSharp;
 
-// Creating clients for embedding and chat
+// ── 1. Clients ──────────────────────────────────────────────────────────────
 var ollamaUri = new Uri("http://localhost:11434/");
 
 IChatClient chatClient = new OllamaApiClient(ollamaUri, "phi3:mini");
@@ -10,6 +13,7 @@ IEmbeddingGenerator<string, Embedding<float>> embedder =
 
 // ── 2. Load & chunk documents ────────────────────────────────────────────────
 var docsPath = Path.Combine(AppContext.BaseDirectory, "docs");
+var cachePath = Path.Combine(AppContext.BaseDirectory, "embeddings.cache.json");
 var chunks = new List<string>();
 
 if (Directory.Exists(docsPath))
@@ -24,14 +28,33 @@ if (Directory.Exists(docsPath))
 
 Console.WriteLine($"Loaded {chunks.Count} chunks from {docsPath}");
 
-// ── 3. Embed all chunks up front ─────────────────────────────────────────────
-Console.WriteLine("Embedding chunks, please wait...");
+// ── 3. Embed chunks (or load from cache) ────────────────────────────────────
 var chunkEmbeddings = new List<(string Chunk, float[] Vector)>();
 
-foreach (var chunk in chunks)
+if (File.Exists(cachePath))
 {
-    var result = await embedder.GenerateAsync([chunk]);
-    chunkEmbeddings.Add((chunk, result[0].Vector.ToArray()));
+    Console.WriteLine("Loading embeddings from cache...");
+    var cached = JsonSerializer.Deserialize<List<CachedEmbedding>>(
+        await File.ReadAllTextAsync(cachePath));
+
+    // Only use cache if the number of chunks hasn't changed
+    if (cached != null && cached.Count == chunks.Count)
+    {
+        chunkEmbeddings = cached
+            .Select(c => (c.Chunk, c.Vector))
+            .ToList();
+        Console.WriteLine("Cache loaded successfully.");
+    }
+    else
+    {
+        Console.WriteLine("Cache is stale (docs changed), re-embedding...");
+        chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath);
+    }
+}
+else
+{
+    Console.WriteLine("No cache found, embedding chunks for the first time...");
+    chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath);
 }
 
 Console.WriteLine("Ready! Ask anything about your docs.\n");
@@ -45,7 +68,6 @@ while (true)
     var userPrompt = Console.ReadLine();
     if (string.IsNullOrWhiteSpace(userPrompt)) continue;
 
-    // Embed the user question and find the top 3 relevant chunks
     var questionEmbedding = await embedder.GenerateAsync([userPrompt]);
     var questionVector = questionEmbedding[0].Vector.ToArray();
 
@@ -56,7 +78,6 @@ while (true)
         .Select(c => c.Chunk)
         .ToList();
 
-    // Build a context-aware prompt
     var context = string.Join("\n\n", topChunks);
     var augmentedPrompt = $"""
         Use the following context to answer the question.
@@ -83,6 +104,27 @@ while (true)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+static async Task<List<(string Chunk, float[] Vector)>> EmbedAndCache(
+    List<string> chunks,
+    IEmbeddingGenerator<string, Embedding<float>> embedder,
+    string cachePath)
+{
+    var results = new List<(string Chunk, float[] Vector)>();
+    var toCache = new List<CachedEmbedding>();
+
+    foreach (var chunk in chunks)
+    {
+        var result = await embedder.GenerateAsync([chunk]);
+        var vector = result[0].Vector.ToArray();
+        results.Add((chunk, vector));
+        toCache.Add(new CachedEmbedding { Chunk = chunk, Vector = vector });
+    }
+
+    await File.WriteAllTextAsync(cachePath, JsonSerializer.Serialize(toCache));
+    Console.WriteLine("Embeddings saved to cache.");
+    return results;
+}
+
 static IEnumerable<string> ChunkText(string text, int chunkSize)
 {
     var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -115,4 +157,11 @@ static float CosineSimilarity(float[] a, float[] b)
         magB += b[i] * b[i];
     }
     return dot / (MathF.Sqrt(magA) * MathF.Sqrt(magB));
+}
+
+// ── Cache model ───────────────────────────────────────────────────────────────
+public class CachedEmbedding
+{
+    public string Chunk { get; set; } = "";
+    public float[] Vector { get; set; } = [];
 }
