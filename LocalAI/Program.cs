@@ -16,30 +16,42 @@ IEmbeddingGenerator<string, Embedding<float>> embedder =
 // ── 2. Load & chunk documents ────────────────────────────────────────────────
 var docsPath = Path.Combine(AppContext.BaseDirectory, "docs");
 var cachePath = Path.Combine(AppContext.BaseDirectory, "embeddings.cache.json");
-var chunks = new List<string>();
+var chunks = new List<(string Text, string FileName, int PageNumber)>();
 
 foreach (var file in Directory.GetFiles(docsPath, "*.*")
     .Where(f => f.EndsWith(".txt") || f.EndsWith(".md") || f.EndsWith(".pdf")))
 {
-    string text;
+    var fileName = Path.GetFileName(file);
 
     if (file.EndsWith(".pdf"))
     {
-        text = ExtractTextFromPdf(file);
-        Console.WriteLine($"Extracted text from PDF: {Path.GetFileName(file)}");
+        // Extract per page so we keep page number info
+        using var pdf = PdfDocument.Open(file);
+        foreach (var page in pdf.GetPages())
+        {
+            var words = page.GetWords();
+            var pageText = string.Join(" ", words.Select(w => w.Text));
+            var pageChunks = ChunkText(pageText, chunkSize: 150);
+
+            foreach (var chunk in pageChunks)
+                chunks.Add((chunk, fileName, page.Number));
+        }
+        Console.WriteLine($"Extracted text from PDF: {fileName}");
     }
     else
     {
-        text = await File.ReadAllTextAsync(file);
-    }
+        var text = await File.ReadAllTextAsync(file);
+        var fileChunks = ChunkText(text, chunkSize: 150);
 
-    chunks.AddRange(ChunkText(text, chunkSize: 150));
+        foreach (var chunk in fileChunks)
+            chunks.Add((chunk, fileName, 0)); // 0 = no page concept for txt/md
+    }
 }
 
 Console.WriteLine($"Loaded {chunks.Count} chunks from {docsPath}");
 
 // ── 3. Embed chunks (or load from cache) ────────────────────────────────────
-var chunkEmbeddings = new List<(string Chunk, float[] Vector)>();
+var chunkEmbeddings = new List<(string Chunk, string FileName, int PageNumber, float[] Vector)>();
 var currentHash = await ComputeDocsHash(docsPath);
 
 if (File.Exists(cachePath))
@@ -52,7 +64,9 @@ if (File.Exists(cachePath))
 
     if (cached != null && cachedHash == currentHash)
     {
-        chunkEmbeddings = cached.Select(c => (c.Chunk, c.Vector)).ToList();
+        chunkEmbeddings = cached
+            .Select(c => (c.Chunk, c.FileName, c.PageNumber, c.Vector))
+            .ToList();
         Console.WriteLine("Cache loaded successfully.");
     }
     else
@@ -80,22 +94,34 @@ while (true)
     var questionVector = questionEmbedding[0].Vector.ToArray();
 
     var topChunks = chunkEmbeddings
-        .Select(c => (c.Chunk, Score: CosineSimilarity(questionVector, c.Vector)))
-        .OrderByDescending(c => c.Score)
-        .Take(3)
-        .Select(c => c.Chunk)
-        .ToList();
+    .Select(c => (c.Chunk, c.FileName, c.PageNumber,
+        Score: CosineSimilarity(questionVector, c.Vector)))
+    .OrderByDescending(c => c.Score)
+    .Take(3)
+    .ToList();
 
-    var context = string.Join("\n\n", topChunks);
+    // Build context with source labels
+    var contextBlocks = topChunks.Select((c, i) =>
+    {
+        var source = c.PageNumber > 0
+            ? $"[Source {i + 1}: {c.FileName}, Page {c.PageNumber}]"
+            : $"[Source {i + 1}: {c.FileName}]";
+        return $"{source}\n{c.Chunk}";
+    });
+
+    var context = string.Join("\n\n", contextBlocks);
+
     var augmentedPrompt = $"""
-        Use the following context to answer the question.
-        If the answer isn't in the context, say so honestly.
+    Use the following context to answer the question.
+    Each context block is labeled with its source file and page number.
+    At the end of your answer, list which sources you used by specifically mentioning the file name and page number.
+    If the answer isn't in the context, say so honestly.
 
-        Context:
-        {context}
+    Context:
+    {context}
 
-        Question: {userPrompt}
-        """;
+    Question: {userPrompt}
+    """;
 
     chatHistory.Add(new ChatMessage(ChatRole.User, augmentedPrompt));
 
@@ -112,23 +138,28 @@ while (true)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-static async Task<List<(string Chunk, float[] Vector)>> EmbedAndCache(
-    List<string> chunks,
+static async Task<List<(string Chunk, string FileName, int PageNumber, float[] Vector)>> EmbedAndCache(
+    List<(string Text, string FileName, int PageNumber)> chunks,
     IEmbeddingGenerator<string, Embedding<float>> embedder,
-    string cachePath, string docsHash)
+    string cachePath,
+    string docsHash)
 {
-    var results = new List<(string Chunk, float[] Vector)>();
+    var results = new List<(string Chunk, string FileName, int PageNumber, float[] Vector)>();
     var toCache = new List<CachedEmbedding>();
 
-    foreach (var chunk in chunks)
+    foreach (var (text, fileName, pageNumber) in chunks)
     {
-        var result = await embedder.GenerateAsync([chunk]);
+        var result = await embedder.GenerateAsync([text]);
         var vector = result[0].Vector.ToArray();
-        results.Add((chunk, vector));
-        toCache.Add(new CachedEmbedding { 
-            DocsHash = docsHash, 
-            Chunk = chunk, 
-            Vector = vector });
+        results.Add((text, fileName, pageNumber, vector));
+        toCache.Add(new CachedEmbedding
+        {
+            DocsHash = docsHash,
+            Chunk = text,
+            FileName = fileName,
+            PageNumber = pageNumber,
+            Vector = vector
+        });
     }
 
     await File.WriteAllTextAsync(cachePath, JsonSerializer.Serialize(toCache));
@@ -212,4 +243,6 @@ public class CachedEmbedding
     public string DocsHash { get; set; } = "";
     public string Chunk { get; set; } = "";
     public float[] Vector { get; set; } = [];
+    public string FileName { get; set; } = "";
+    public int PageNumber { get; set; } = 0;
 }
