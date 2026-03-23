@@ -3,6 +3,8 @@ using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using OllamaSharp;
+using UglyToad.PdfPig;
+using UglyToad.PdfPig.Content;
 
 // ── 1. Clients ──────────────────────────────────────────────────────────────
 var ollamaUri = new Uri("http://localhost:11434/");
@@ -16,20 +18,29 @@ var docsPath = Path.Combine(AppContext.BaseDirectory, "docs");
 var cachePath = Path.Combine(AppContext.BaseDirectory, "embeddings.cache.json");
 var chunks = new List<string>();
 
-if (Directory.Exists(docsPath))
+foreach (var file in Directory.GetFiles(docsPath, "*.*")
+    .Where(f => f.EndsWith(".txt") || f.EndsWith(".md") || f.EndsWith(".pdf")))
 {
-    foreach (var file in Directory.GetFiles(docsPath, "*.*")
-        .Where(f => f.EndsWith(".txt") || f.EndsWith(".md")))
+    string text;
+
+    if (file.EndsWith(".pdf"))
     {
-        var text = await File.ReadAllTextAsync(file);
-        chunks.AddRange(ChunkText(text, chunkSize: 300));
+        text = ExtractTextFromPdf(file);
+        Console.WriteLine($"Extracted text from PDF: {Path.GetFileName(file)}");
     }
+    else
+    {
+        text = await File.ReadAllTextAsync(file);
+    }
+
+    chunks.AddRange(ChunkText(text, chunkSize: 150));
 }
 
 Console.WriteLine($"Loaded {chunks.Count} chunks from {docsPath}");
 
 // ── 3. Embed chunks (or load from cache) ────────────────────────────────────
 var chunkEmbeddings = new List<(string Chunk, float[] Vector)>();
+var currentHash = await ComputeDocsHash(docsPath);
 
 if (File.Exists(cachePath))
 {
@@ -37,27 +48,24 @@ if (File.Exists(cachePath))
     var cached = JsonSerializer.Deserialize<List<CachedEmbedding>>(
         await File.ReadAllTextAsync(cachePath));
 
-    // Only use cache if the number of chunks hasn't changed
-    if (cached != null && cached.Count == chunks.Count)
+    var cachedHash = cached?.FirstOrDefault()?.DocsHash ?? "";
+
+    if (cached != null && cachedHash == currentHash)
     {
-        chunkEmbeddings = cached
-            .Select(c => (c.Chunk, c.Vector))
-            .ToList();
+        chunkEmbeddings = cached.Select(c => (c.Chunk, c.Vector)).ToList();
         Console.WriteLine("Cache loaded successfully.");
     }
     else
     {
-        Console.WriteLine("Cache is stale (docs changed), re-embedding...");
-        chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath);
+        Console.WriteLine("Docs have changed, re-embedding...");
+        chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath, currentHash);
     }
 }
 else
 {
-    Console.WriteLine("No cache found, embedding chunks for the first time...");
-    chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath);
+    Console.WriteLine("No cache found, embedding for the first time...");
+    chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath, currentHash);
 }
-
-Console.WriteLine("Ready! Ask anything about your docs.\n");
 
 // ── 4. Chat loop ─────────────────────────────────────────────────────────────
 var chatHistory = new List<ChatMessage>();
@@ -107,7 +115,7 @@ while (true)
 static async Task<List<(string Chunk, float[] Vector)>> EmbedAndCache(
     List<string> chunks,
     IEmbeddingGenerator<string, Embedding<float>> embedder,
-    string cachePath)
+    string cachePath, string docsHash)
 {
     var results = new List<(string Chunk, float[] Vector)>();
     var toCache = new List<CachedEmbedding>();
@@ -117,12 +125,51 @@ static async Task<List<(string Chunk, float[] Vector)>> EmbedAndCache(
         var result = await embedder.GenerateAsync([chunk]);
         var vector = result[0].Vector.ToArray();
         results.Add((chunk, vector));
-        toCache.Add(new CachedEmbedding { Chunk = chunk, Vector = vector });
+        toCache.Add(new CachedEmbedding { 
+            DocsHash = docsHash, 
+            Chunk = chunk, 
+            Vector = vector });
     }
 
     await File.WriteAllTextAsync(cachePath, JsonSerializer.Serialize(toCache));
     Console.WriteLine("Embeddings saved to cache.");
     return results;
+}
+
+static async Task<string> ComputeDocsHash(string docsPath)
+{
+    var files = Directory.GetFiles(docsPath, "*.*")
+        .Where(f => f.EndsWith(".txt") || f.EndsWith(".md"))
+        .OrderBy(f => f) // consistent order
+        .ToList();
+
+    using var sha256 = System.Security.Cryptography.SHA256.Create();
+    var allBytes = new List<byte>();
+
+    foreach (var file in files)
+    {
+        // Include the filename so renames are detected too
+        allBytes.AddRange(System.Text.Encoding.UTF8.GetBytes(Path.GetFileName(file)));
+        allBytes.AddRange(await File.ReadAllBytesAsync(file));
+    }
+
+    var hash = sha256.ComputeHash(allBytes.ToArray());
+    return Convert.ToHexString(hash);
+}
+
+static string ExtractTextFromPdf(string filePath)
+{
+    var sb = new System.Text.StringBuilder();
+
+    using var pdf = PdfDocument.Open(filePath);
+    foreach (var page in pdf.GetPages())
+    {
+        // GetWords() preserves reading order better than Letters
+        var words = page.GetWords();
+        sb.AppendLine(string.Join(" ", words.Select(w => w.Text)));
+    }
+
+    return sb.ToString();
 }
 
 static IEnumerable<string> ChunkText(string text, int chunkSize)
@@ -162,6 +209,7 @@ static float CosineSimilarity(float[] a, float[] b)
 // ── Cache model ───────────────────────────────────────────────────────────────
 public class CachedEmbedding
 {
+    public string DocsHash { get; set; } = "";
     public string Chunk { get; set; } = "";
     public float[] Vector { get; set; } = [];
 }
