@@ -31,7 +31,7 @@ foreach (var file in Directory.GetFiles(docsPath, "*.*")
         {
             var words = page.GetWords();
             var pageText = string.Join(" ", words.Select(w => w.Text));
-            var pageChunks = ChunkText(pageText, chunkSize: 150);
+            var pageChunks = ChunkText(pageText, chunkSize: 300);
 
             foreach (var chunk in pageChunks)
                 chunks.Add((chunk, fileName, page.Number));
@@ -41,7 +41,7 @@ foreach (var file in Directory.GetFiles(docsPath, "*.*")
     else
     {
         var text = await File.ReadAllTextAsync(file);
-        var fileChunks = ChunkText(text, chunkSize: 150);
+        var fileChunks = ChunkText(text, chunkSize: 300);
 
         foreach (var chunk in fileChunks)
             chunks.Add((chunk, fileName, 0));
