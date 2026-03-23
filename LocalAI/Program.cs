@@ -6,14 +6,14 @@ using OllamaSharp;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
 
-// ── 1. Clients ──────────────────────────────────────────────────────────────
+// Clients
 var ollamaUri = new Uri("http://localhost:11434/");
 
 IChatClient chatClient = new OllamaApiClient(ollamaUri, "phi3:mini");
 IEmbeddingGenerator<string, Embedding<float>> embedder =
     new OllamaApiClient(ollamaUri, "nomic-embed-text");
 
-// ── 2. Load & chunk documents ────────────────────────────────────────────────
+// Load & chunk documents
 var docsPath = Path.Combine(AppContext.BaseDirectory, "docs");
 var cachePath = Path.Combine(AppContext.BaseDirectory, "embeddings.cache.json");
 var chunks = new List<(string Text, string FileName, int PageNumber)>();
@@ -25,7 +25,7 @@ foreach (var file in Directory.GetFiles(docsPath, "*.*")
 
     if (file.EndsWith(".pdf"))
     {
-        // Extract per page so we keep page number info
+
         using var pdf = PdfDocument.Open(file);
         foreach (var page in pdf.GetPages())
         {
@@ -44,13 +44,13 @@ foreach (var file in Directory.GetFiles(docsPath, "*.*")
         var fileChunks = ChunkText(text, chunkSize: 150);
 
         foreach (var chunk in fileChunks)
-            chunks.Add((chunk, fileName, 0)); // 0 = no page concept for txt/md
+            chunks.Add((chunk, fileName, 0));
     }
 }
 
 Console.WriteLine($"Loaded {chunks.Count} chunks from {docsPath}");
 
-// ── 3. Embed chunks (or load from cache) ────────────────────────────────────
+// Embed chunks (or load from cache)
 var chunkEmbeddings = new List<(string Chunk, string FileName, int PageNumber, float[] Vector)>();
 var currentHash = await ComputeDocsHash(docsPath);
 
@@ -81,7 +81,7 @@ else
     chunkEmbeddings = await EmbedAndCache(chunks, embedder, cachePath, currentHash);
 }
 
-// ── 4. Chat loop ─────────────────────────────────────────────────────────────
+// Chat loop
 var chatHistory = new List<ChatMessage>();
 
 while (true)
@@ -137,7 +137,7 @@ while (true)
     Console.WriteLine("\n");
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 static async Task<List<(string Chunk, string FileName, int PageNumber, float[] Vector)>> EmbedAndCache(
     List<(string Text, string FileName, int PageNumber)> chunks,
     IEmbeddingGenerator<string, Embedding<float>> embedder,
@@ -237,7 +237,7 @@ static float CosineSimilarity(float[] a, float[] b)
     return dot / (MathF.Sqrt(magA) * MathF.Sqrt(magB));
 }
 
-// ── Cache model ───────────────────────────────────────────────────────────────
+// Cache model
 public class CachedEmbedding
 {
     public string DocsHash { get; set; } = "";
