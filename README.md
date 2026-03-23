@@ -16,6 +16,14 @@ A **lightweight, local Retrieval-Augmented Generation (RAG)** system built with 
 
 ---
 
+## Steps
+
+- Clone the repo
+- Create a folder named "docs" in the root directory and save the .pdf/ .txt/ .md files in it
+- dotnet run
+
+---
+
 ## Prerequisites
 
 - **.NET 8.0+**
